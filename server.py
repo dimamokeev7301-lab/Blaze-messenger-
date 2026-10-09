@@ -971,54 +971,6 @@ def user_public(u):
 # ============ АВТОРИЗАЦИЯ ============
 async def handle_auth(websocket, first_msg):
     action = first_msg.get("action")
-    # ⭐ Вход по JWT-токену (для автосохранения сессии)
-if action == "token":
-    token = first_msg.get("token", "")
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
-        user_id = payload.get("user_id")
-        # Загружаем юзера из БД
-        def _q():
-            with db_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT id, username, display_name, avatar_color, bio, "
-                        "avatar_data, language, theme FROM users WHERE id=%s",
-                        (user_id,)
-                    )
-                    return cur.fetchone()
-        u = await asyncio.to_thread(_q)
-        if not u:
-            await websocket.send(json.dumps({
-                "type": "auth_error", "text": "Сессия истекла"
-            }, ensure_ascii=False))
-            return None
-        return {
-            "id": u["id"],
-            "name": u["username"],
-            "display_name": u.get("display_name") or u["username"],
-            "color": u.get("avatar_color", "#ff6b00"),
-            "bio": u.get("bio", ""),
-            "avatar_data": u.get("avatar_data"),
-            "language": u.get("language", "ru"),
-            "theme": u.get("theme", "dark"),
-            "token": token,
-        }
-    except Exception as e:
-        print(f"Token auth error: {e}")
-        await websocket.send(json.dumps({
-            "type": "auth_error", "text": "Сессия истекла"
-        }, ensure_ascii=False))
-        return None
-    username = str(first_msg.get("username", "")).strip()[:20]
-    password = str(first_msg.get("password", ""))
-
-    if not username or not password:
-        await websocket.send(json.dumps({
-            "type": "auth_error",
-            "text": "Логин и пароль обязательны"
-        }, ensure_ascii=False))
-        return None
 
     if not DATABASE_URL:
         # Гостевой режим
