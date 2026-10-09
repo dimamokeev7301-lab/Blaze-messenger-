@@ -17,7 +17,7 @@ if DATABASE_URL.startswith("postgres://"):
 JWT_SECRET = os.environ.get("JWT_SECRET", "change-me-in-production")
 JWT_ALGO = "HS256"
 MAX_HISTORY = 100
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+MAX_FILE_SIZE = 5 * 1024 * 1024
 
 
 # ============ БАЗА ДАННЫХ ============
@@ -201,12 +201,11 @@ async def db_update_last_seen(user_id):
     await asyncio.to_thread(_q)
 
 
-# ============ WEBSOCKET СЕРВЕР ============
-clients = {}  # {websocket: {"id": int, "name": str, "color": str}}
+# ============ WEBSOCKET ============
+clients = {}
 
 
 async def process_request(path, request_headers):
-    """Health-check для Render / Railway."""
     if "Upgrade" not in request_headers.get("Connection", ""):
         return http.HTTPStatus.OK, [], b"Blaze Messenger is running\n"
     return None
@@ -253,7 +252,6 @@ async def handle_auth(websocket, first_msg):
         }, ensure_ascii=False))
         return None
 
-    # Гостевой режим (если БД не подключена)
     if not DATABASE_URL:
         return {
             "id": None,
@@ -311,7 +309,6 @@ async def handler(websocket):
             await websocket.close()
             return
 
-        # Уникальность ника среди онлайн
         base_name = user["name"]
         final_name = base_name
         i = 1
@@ -323,7 +320,6 @@ async def handler(websocket):
         clients[websocket] = user
         print(f"[+] {user['name']} (id={user['id']}). Всего: {len(clients)}")
 
-        # Приветствие + токен
         await websocket.send(json.dumps({
             "type": "auth_ok",
             "user": {
@@ -334,7 +330,6 @@ async def handler(websocket):
             "token": user["token"],
         }, ensure_ascii=False))
 
-        # История
         history = await db_get_history()
         msg_ids = [m["id"] for m in history]
         reads = await db_get_reads(msg_ids)
@@ -347,7 +342,6 @@ async def handler(websocket):
             "messages": history,
         }, ensure_ascii=False))
 
-        # Уведомить остальных
         await broadcast({
             "type": "system",
             "text": f"{user['name']} присоединился",
@@ -355,7 +349,6 @@ async def handler(websocket):
         }, exclude=websocket)
         await broadcast_users()
 
-        # Основной цикл
         async for message in websocket:
             try:
                 msg = json.loads(message)
@@ -364,7 +357,6 @@ async def handler(websocket):
 
             mtype = msg.get("type")
 
-            # === ОБЫЧНОЕ СООБЩЕНИЕ ===
             if mtype == "message":
                 text = str(msg.get("text", ""))[:4000]
                 file_data = msg.get("file_data")
@@ -409,14 +401,12 @@ async def handler(websocket):
                     "read_by": 0,
                 })
 
-            # === «ПЕЧАТАЕТ...» ===
             elif mtype == "typing":
                 await broadcast({
                     "type": "typing",
                     "nickname": user["name"],
                 }, exclude=websocket)
 
-            # === ПРОЧИТАНО ===
             elif mtype == "read":
                 msg_id = msg.get("message_id")
                 if msg_id and user["id"]:
@@ -427,7 +417,6 @@ async def handler(websocket):
                         "user_id": user["id"],
                     }, exclude=websocket)
 
-            # === PING (keep-alive) ===
             elif mtype == "ping":
                 await websocket.send(json.dumps({"type": "pong"}))
 
