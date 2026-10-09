@@ -957,15 +957,16 @@ def now_str():
 
 def user_public(u):
     """Публичные данные пользователя"""
+    # Поддерживаем оба варианта: dict из БД (username) и dict из памяти (name)
+    username = u.get("username") or u.get("name") or ""
     return {
-        "id": u["id"],
-        "username": u["username"],
-        "display_name": u.get("display_name") or u["username"],
-        "color": u.get("avatar_color", "#ff6b00"),
+        "id": u.get("id"),
+        "username": username,
+        "display_name": u.get("display_name") or username,
+        "color": u.get("avatar_color") or u.get("color") or "#ff6b00",
         "avatar_data": u.get("avatar_data"),
         "bio": u.get("bio", ""),
     }
-
 
 # ============ АВТОРИЗАЦИЯ ============
 async def handle_auth(websocket, first_msg):
