@@ -1,5 +1,7 @@
 # ============================================================
-#  BLAZE MESSENGER v2.0 — SERVER (полная версия)
+#  НАЧАЛО ЧАСТИ 1/6 — Импорты, БД, пользователи
+# ============================================================
+#  BLAZE MESSENGER v3.0 — SERVER
 # ============================================================
 
 import asyncio
@@ -44,6 +46,7 @@ async def init_db():
                     CREATE TABLE IF NOT EXISTS users (
                         id SERIAL PRIMARY KEY,
                         username TEXT UNIQUE NOT NULL,
+                        phone TEXT,
                         password_hash TEXT NOT NULL,
                         display_name TEXT,
                         bio TEXT DEFAULT '',
@@ -55,6 +58,15 @@ async def init_db():
                         created_at TIMESTAMP DEFAULT NOW()
                     );
                 """)
+                try:
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT")
+                except Exception as e:
+                    print(f"Migration phone: {e}")
+                try:
+                    cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT")
+                except Exception as e:
+                    print(f"Migration display_name: {e}")
+
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS chats (
                         id SERIAL PRIMARY KEY,
@@ -128,7 +140,7 @@ async def init_db():
 
 
 # ============ USERS ============
-async def db_create_user(username, password):
+async def db_create_user(username, password, phone=None, display_name=None):
     if not DATABASE_URL:
         return None
     pw_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -141,10 +153,10 @@ async def db_create_user(username, password):
                               "#ff5722", "#f4511e", "#bf360c", "#e64a19"]
                     color = colors[sum(ord(c) for c in username) % len(colors)]
                     cur.execute(
-                        "INSERT INTO users (username, display_name, password_hash, avatar_color) "
-                        "VALUES (%s, %s, %s, %s) "
+                        "INSERT INTO users (username, phone, display_name, password_hash, avatar_color) "
+                        "VALUES (%s, %s, %s, %s, %s) "
                         "RETURNING id, username, display_name, avatar_color, bio, avatar_data, language, theme",
-                        (username, username, pw_hash, color)
+                        (username, phone or None, display_name or username, pw_hash, color)
                     )
                     row = cur.fetchone()
                 conn.commit()
@@ -181,7 +193,7 @@ async def db_get_user_by_id(user_id):
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT id, username, display_name, avatar_color, bio, avatar_data, "
-                    "last_seen FROM users WHERE id=%s",
+                    "language, theme, last_seen FROM users WHERE id=%s",
                     (user_id,)
                 )
                 return cur.fetchone()
@@ -284,7 +296,16 @@ async def db_search_users(query, exclude_id=None):
                 return cur.fetchall()
 
     return await asyncio.to_thread(_q)
-    # ============ CHATS ============
+
+# ============================================================
+#  КОНЕЦ ЧАСТИ 1/6
+#  Следующая часть: НАЧАЛО ЧАСТИ 2/6 — CHATS (чаты и группы)
+# ============================================================
+# ============================================================
+#  НАЧАЛО ЧАСТИ 2/6 — CHATS (чаты, группы, участники)
+# ============================================================
+
+# ============ CHATS ============
 async def db_get_or_create_private_chat(user1_id, user2_id):
     if not DATABASE_URL:
         return None
@@ -585,7 +606,16 @@ async def db_mark_chat_read(chat_id, user_id, last_message_id):
             conn.commit()
 
     await asyncio.to_thread(_q)
-    # ============ MESSAGES ============
+
+# ============================================================
+#  КОНЕЦ ЧАСТИ 2/6
+#  Следующая часть: НАЧАЛО ЧАСТИ 3/6 — MESSAGES (сообщения, реакции, поиск)
+# ============================================================
+# ============================================================
+#  НАЧАЛО ЧАСТИ 3/6 — MESSAGES (сообщения, реакции, поиск)
+# ============================================================
+
+# ============ MESSAGES ============
 async def db_save_message(chat_id, sender_id, sender_name, msg_type='text',
                           text=None, file_data=None, file_name=None,
                           file_type=None, duration=None, reply_to=None,
@@ -846,14 +876,23 @@ async def db_get_push_subs(user_ids):
                 return cur.fetchall()
 
     return await asyncio.to_thread(_q)
-    # ============ WEBSOCKET ============
+
+# ============================================================
+#  КОНЕЦ ЧАСТИ 3/6
+#  Следующая часть: НАЧАЛО ЧАСТИ 4/6 — WEBSOCKET (auth, handler)
+# ============================================================
+# ============================================================
+#  НАЧАЛО ЧАСТИ 4/6 — WEBSOCKET (auth + handler)
+# ============================================================
+
+# ============ WEBSOCKET ============
 clients = {}
 user_sockets = {}
 
 
 async def process_request(path, request_headers):
     if "Upgrade" not in request_headers.get("Connection", ""):
-        return http.HTTPStatus.OK, [], b"Blaze Messenger v2.0 is running\n"
+        return http.HTTPStatus.OK, [], b"Blaze Messenger v3.0 is running\n"
     return None
 
 
@@ -891,7 +930,7 @@ def now_str():
 
 
 def user_public(u):
-    """Публичные данные пользователя (универсальная функция)"""
+    """Публичные данные пользователя"""
     username = u.get("username") or u.get("name") or ""
     return {
         "id": u.get("id"),
@@ -900,14 +939,49 @@ def user_public(u):
         "color": u.get("avatar_color") or u.get("color") or "#ff6b00",
         "avatar_data": u.get("avatar_data"),
         "bio": u.get("bio", ""),
+        "last_seen": u.get("last_seen").isoformat() if u.get("last_seen") and hasattr(u.get("last_seen"), "isoformat") else u.get("last_seen"),
     }
 
 
 # ============ АВТОРИЗАЦИЯ ============
 async def handle_auth(websocket, first_msg):
     action = first_msg.get("action")
+
+    # ⭐ ВХОД ПО JWT-ТОКЕНУ (автосохранение сессии)
+    if action == "token":
+        token = first_msg.get("token", "")
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+            user_id = payload.get("user_id")
+            u = await db_get_user_by_id(user_id)
+            if not u:
+                await websocket.send(json.dumps({
+                    "type": "auth_error", "text": "Сессия истекла"
+                }, ensure_ascii=False))
+                return None
+            return {
+                "id": u["id"],
+                "name": u["username"],
+                "display_name": u.get("display_name") or u["username"],
+                "color": u.get("avatar_color", "#ff6b00"),
+                "bio": u.get("bio", ""),
+                "avatar_data": u.get("avatar_data"),
+                "language": u.get("language", "ru"),
+                "theme": u.get("theme", "dark"),
+                "token": token,
+            }
+        except Exception as e:
+            print(f"Token auth error: {e}")
+            await websocket.send(json.dumps({
+                "type": "auth_error", "text": "Сессия истекла"
+            }, ensure_ascii=False))
+            return None
+
+    # Обычный вход/регистрация
     username = str(first_msg.get("username", "")).strip()[:20]
     password = str(first_msg.get("password", ""))
+    phone = str(first_msg.get("phone", "")).strip()[:20]
+    display_name = str(first_msg.get("display_name", "")).strip()[:30]
 
     if not username or not password:
         await websocket.send(json.dumps({
@@ -920,7 +994,7 @@ async def handle_auth(websocket, first_msg):
         return {
             "id": 1,
             "name": username,
-            "display_name": username,
+            "display_name": display_name or username,
             "color": "#ff6b00",
             "bio": "",
             "avatar_data": None,
@@ -930,7 +1004,7 @@ async def handle_auth(websocket, first_msg):
         }
 
     if action == "register":
-        user = await db_create_user(username, password)
+        user = await db_create_user(username, password, phone, display_name)
         if not user:
             await websocket.send(json.dumps({
                 "type": "auth_error",
@@ -948,7 +1022,7 @@ async def handle_auth(websocket, first_msg):
     else:
         await websocket.send(json.dumps({
             "type": "auth_error",
-            "text": "Укажите action: login или register"
+            "text": "Укажите action: login, register или token"
         }, ensure_ascii=False))
         return None
 
@@ -1286,8 +1360,7 @@ async def handler(websocket):
                         "type": "chat_updated",
                         "chat": dict(info) if info else {},
                     })
-
-            # ===== ВЫЙТИ ИЗ ГРУППЫ =====
+# ===== ВЫЙТИ ИЗ ГРУППЫ =====
             elif mtype == "leave_chat":
                 chat_id = msg.get("chat_id")
                 if chat_id:
@@ -1332,7 +1405,28 @@ async def handler(websocket):
         pass
     except Exception as e:
         print(f"[!] Ошибка: {e}")
-       # ============ ОБРАБОТКА НОВОГО СООБЩЕНИЯ ============
+        import traceback
+        traceback.print_exc()
+    finally:
+        if websocket in clients:
+            user_info = clients[websocket]
+            del clients[websocket]
+            if user_info["id"] in user_sockets:
+                user_sockets[user_info["id"]].discard(websocket)
+                if not user_sockets[user_info["id"]]:
+                    del user_sockets[user_info["id"]]
+            if user_info["id"]:
+                await db_update_last_seen(user_info["id"])
+            print(f"[-] {user_info['name']}. Всего: {len(clients)}")
+
+# ============================================================
+#  КОНЕЦ ЧАСТИ 4/6
+#  Следующая часть: НАЧАЛО ЧАСТИ 5/6 — MESSAGE HANDLER (обработка сообщений)
+# ============================================================
+# ============================================================
+#  НАЧАЛО ЧАСТИ 5/6 — MESSAGE HANDLER (обработка сообщений)
+# ============================================================
+
 async def handle_new_message(websocket, user, msg):
     chat_id = msg.get("chat_id")
     if not chat_id:
@@ -1391,7 +1485,6 @@ async def handle_new_message(websocket, user, msg):
     msg_id = saved["id"]
     created = saved["created_at"].isoformat() if saved["created_at"] else datetime.datetime.now().isoformat()
 
-    # Reply-инфо
     reply_info = None
     if reply_to:
         orig = await db_get_message_by_id(reply_to)
@@ -1402,7 +1495,6 @@ async def handle_new_message(websocket, user, msg):
                 "text": orig["text"] or "📎 Файл",
             }
 
-    # Рассылаем
     await broadcast_chat(chat_id, {
         "type": "new_message",
         "chat_id": chat_id,
@@ -1425,19 +1517,25 @@ async def handle_new_message(websocket, user, msg):
         "reactions": {},
     })
 
-    # Обновляем список чатов у всех участников
     for uid in await db_get_chat_member_ids(chat_id):
         chats = await db_get_user_chats(uid)
         await send_to_user(uid, {"type": "chats_list", "chats": chats})
 
+# ============================================================
+#  КОНЕЦ ЧАСТИ 5/6
+#  Следующая часть: НАЧАЛО ЧАСТИ 6/6 — MAIN (запуск сервера)
+# ============================================================
+# ============================================================
+#  НАЧАЛО ЧАСТИ 6/6 — MAIN (запуск сервера)
+# ============================================================
 
 # ============ MAIN ============
 async def main():
     await init_db()
     port = int(os.environ.get("PORT", 8765))
-    print(f"🚀 Blaze Messenger v2.0 на порту {port}")
+    print(f"🚀 Blaze Messenger v3.0 на порту {port}")
     print(f"📦 Модули: чаты, группы, голосовые, огоньки, реакции, поиск,")
-    print(f"          профили, языки, push, звонки (WebRTC)")
+    print(f"          профили, языки, push, звонки (WebRTC), авто-вход")
 
     async with websockets.serve(
         handler,
@@ -1453,3 +1551,8 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# ============================================================
+#  КОНЕЦ ЧАСТИ 6/6 — ФАЙЛ SERVER.PY ЗАВЕРШЁН
+#  Все 6 частей собраны. Теперь можно заливать на GitHub.
+# ============================================================
